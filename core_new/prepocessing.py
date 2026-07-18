@@ -1,0 +1,268 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from joblib import dump, load
+# from sklearn.semi_supervised.tests.test_self_training import X_train
+from sklearn.utils import resample
+from collections import Counter
+from sklearn.utils import shuffle
+from imblearn.over_sampling import SMOTE
+import tensorflow as tf
+from tensorflow.keras.layers import Input, Concatenate
+
+
+
+
+class Preproccessing:
+
+    def __init__(self,predata:tuple, preproc_file:str, balance_method=None):
+        self.data, self.cols_drop, self.cols_res = predata
+        self.preprocessor = preproc_file
+        self.balance_method = balance_method
+        self.random_state = 42
+
+    def _check_distr(self,X,y):
+        dist = {0: y[y['target'] == 0].size, 1: y[y['target'] == 1].size}
+        print(f'Распределение классов в train-данных до балансировки (после разделения) = {round(100*dist[1]/(dist[0]+dist[1]), 2)}% = {dist}\n'
+              f'X: {X.shape}, y: {y.shape}')
+
+    # ормализация только первичных признаков!!! Индикаторы исключены из процесса нормализации
+    # Аргумент функции - словарь с DataFrames раделенных данных
+    def _normalization(self, row_data:dict)->list:
+        #  row_data = {'X_train':X_train, 'X_val':X_val, 'X_test':X_test} - для обучения модели
+        #  row_data = {'X_train':X_train} - для предсказания (X_train - весь набор входных данных) - на выходе только [X_train_processed]
+        # Разделение на категориальные, числовые и индикаторные признаки
+        categorical_features = ['league', 'host', 'guest']
+        indicators_features = [column for column in row_data['X_train'] if 'ind_' in column]
+        numeric_features = list(row_data['X_train'].columns)
+        [numeric_features.remove(feature) for feature in categorical_features+indicators_features]
+        #Пайплайн предобработки
+        numeric_transformer = Pipeline([
+            # ('imputer', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler())
+        ])
+        categorical_transformer = Pipeline([
+            ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=True))  # Отключаем разреженные матрицы
+        ])
+        preprocessor = ColumnTransformer([
+            ('num', numeric_transformer, numeric_features),
+            # ('cat', categorical_transformer, categorical_features)
+        ])
+        # Обучение преобразователя на train-данных c Сохранением предобработчика после обучения
+        row_X_train = row_data.pop('X_train')
+        X_train_processed = preprocessor.fit_transform(row_X_train[numeric_features])
+        dump(preprocessor, self.preprocessor)
+        X_train_processed = pd.DataFrame(X_train_processed, columns=numeric_features, index=row_X_train.index)
+        X_train_processed = pd.concat([row_X_train[[*categorical_features]], X_train_processed, row_X_train[[*indicators_features]]], axis=1)
+        print(f'\nX_train_processed:\n{X_train_processed}')
+        data_processed = [X_train_processed]
+        # Преобразование валидационных и тестовых данных(при наличии - в режиме learning)
+        if 'X_val' in row_data.keys():
+            row_X_val = row_data.pop('X_val')
+            X_val_processed = preprocessor.transform(row_X_val[numeric_features])
+            X_val_processed = pd.DataFrame(X_val_processed, columns=numeric_features, index=row_X_val.index)
+            X_val_processed = pd.concat([row_X_val[[*categorical_features]], X_val_processed, row_X_val[[*indicators_features]]], axis=1)
+            print(f'\nX_val_processed: \n{X_val_processed}')
+            data_processed.append(X_val_processed)
+        if 'X_test' in  row_data.keys():
+            row_X_test = row_data.pop('X_test')
+            X_test_processed = preprocessor.transform(row_X_test[numeric_features])
+            X_test_processed = pd.DataFrame(X_test_processed, columns=numeric_features, index=row_X_test.index)
+            X_test_processed = pd.concat([row_X_test[[*categorical_features]], X_test_processed, row_X_test[[*indicators_features]]], axis=1)
+            print(f'\nX_test_processed: \n{X_test_processed}')
+            data_processed.append(X_test_processed)
+        return data_processed
+
+    def indicators_setup(self, frames:dict):
+        dict_Xy = {}
+        for name, frame_ in frames.items():
+            # Числовые признаки + их индикаторы
+            feature_columns = []
+            # Создание индикаторов прпуска данных для  H_tourn и G_tourn
+            frame_['ind_H_tourn'] = np.where((frame_['ind_H_place'] == 1) | (frame_['ind_num_place'] == 1), 1, 0)
+            frame_['ind_G_tourn'] = np.where((frame_['ind_G_place'] == 1) | (frame_['ind_num_place'] == 1), 1, 0)
+            frame_ = frame_.drop(columns=['ind_H_place', 'ind_G_place', 'ind_num_place'])
+            col_target = frame_.pop('target')
+            frame_['target'] = col_target
+
+            # Для каждого исходного признака
+            columns = list(frame_.columns)
+            print(frame_.info())
+            for col in columns:
+                if f"ind_{col.split('+')[0]}" in list(map(lambda x: x.split('+')[0], columns)):
+                    # Входы для признаков
+                    num_input = Input(shape=(1,), name=col)
+                    # Входы для индикаторов пропусков
+                    indicator_input = Input(shape=(1,), name=f'ind_{col}')
+                    # Объединяем входы признака с его индикатора пропусков
+                    col_combined = Concatenate()([num_input, indicator_input])
+                    # Добавляем объединенный вход признака и индикатора в список
+                    feature_columns.append(col_combined)
+            feature_combained = Concatenate()(feature_columns)
+            feature_combained = Concatenate()([feature_combained, frame_[['b1', 'bX', 'b2']].astype(np.float32).values])
+            print(feature_combained)
+            dict_Xy.setdefault(name, (frame_, feature_combained))
+        return dict_Xy
+
+    def balance(self, X,y):
+        """
+        X, y - тренировочные данные
+        Балансировка данных выбранным методом.
+        :param method: 'undersampling' или 'oversampling' или 'n' - без балансировки
+        :return: Сбалансированные X, y
+        """
+        if self.balance_method == 'undersample':
+            return self._undersample(X,y)
+        elif self.balance_method == 'oversample':
+            return self._oversample(X,y)
+        elif self.balance_method == 'SMOTE':
+            return self._smote(X,y)
+        elif self.balance_method == 'n':
+            print("Данные не балансировались!")
+            return X, y.values.ravel()
+
+    def _undersample(self, X, y):
+        """
+            Уменьшение размера мажоритарного класса
+            Определение самого частого и редкого классов
+        """
+
+        majority_class = max(self.class_distribution, key=self.class_distribution.get)
+        minority_class = min(self.class_distribution, key=self.class_distribution.get)
+        # Разделение данных
+        self._check_distr(X,y)
+        y = np.array(y)
+        y = y.ravel()  # Преобразует (n, 1) → (n,)
+        X_major = X[y == majority_class]
+        y_major = y[y == majority_class]
+        X_minor = X[y == minority_class]
+        y_minor = y[y == minority_class]
+
+        # Уменьшение мажоритарного класса
+        X_major_down = resample(X_major,
+                                replace=False,
+                                n_samples=len(y_minor),
+                                random_state=self.random_state)
+        y_major_down = resample(y_major,
+                                replace=False,
+                                n_samples=len(y_minor),
+                                random_state=self.random_state)
+
+        # Объединение данных
+        X_balanced = np.vstack([X_major_down, X_minor])
+        y_balanced = np.hstack([y_major_down, y_minor])
+
+
+        return X_balanced, y_balanced
+
+    def _oversample(self,X, y):
+        # Определение самого частого и редкого классов
+        majority_class = max(self.class_distribution, key=self.class_distribution.get)
+        minority_class = min(self.class_distribution, key=self.class_distribution.get)
+
+        self._check_distr(X, y)
+        y = np.array(y)
+        y = y.ravel()  # Преобразует (n, 1) → (n,)
+
+        # Разделение данных
+        X_major = X[y == majority_class]
+        y_major = y[y == majority_class]
+        X_minor = X[y == minority_class]
+        y_minor = y[y == minority_class]
+
+        # Методы увеличения
+        # Простое дублирование
+        X_minor_up = resample(X_minor,
+                              replace=True,
+                              n_samples=len(y_major),
+                              random_state=self.random_state)
+        y_minor_up = resample(y_minor,
+                              replace=True,
+                              n_samples=len(y_major),
+                              random_state=self.random_state)
+
+
+        # Объединение данных
+        X_balanced = np.vstack([X_major, X_minor_up])
+        y_balanced = np.hstack([y_major, y_minor_up])
+
+        # Перемешиваем сбалансированные данные
+        X_balanced, y_balanced = shuffle(X_balanced, y_balanced, random_state=42)
+        print(f"Class 0 after oversampling: {np.sum(y_balanced == 0)}\n"
+              f"Class 1 after oversampling: {np.sum(y_balanced == 1)}")
+
+        return X_balanced, y_balanced
+
+    def _smote(self,X,y):
+        self._check_distr(X, y)
+        smote = SMOTE(random_state=42)
+        X_balanced, y_balanced = smote.fit_resample(X, y)
+        # Перемешиваем сбалансированные данные
+        X_balanced, y_balanced = shuffle(X_balanced, y_balanced, random_state=42)
+        print(f"Class 0 after SMOTE: {np.sum(y_balanced == 0)}\n"
+              f"Class 1 after SMOTE: {np.sum(y_balanced == 1)}")
+        y_balanced = np.array(y_balanced)
+        y_balanced = y_balanced.ravel()  # Преобразует (n, 1) → (n,)
+        return X_balanced, y_balanced
+
+    def learning(self):
+        print("---- Этап 2. Разделение данных на выборки, стандартизация, балансировка ---\n")
+        y = self.data[self.cols_res]
+        X = self.data.drop(columns=self.cols_drop)
+        self.class_distribution = {0: y[y['target'] == 0].size, 1: y[y['target']==1].size}
+
+        # 1. Разделение данных
+        X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3,
+                                                            random_state=self.random_state,stratify=y) # Стратифицированное разделение
+        print( X_train.shape, X_temp.shape, y_train.shape, y_temp.shape)
+            # Разделение на валидацию и тест:
+        X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5,
+                                                          random_state=self.random_state, stratify=y_temp)
+        print(f"Размерности раздельных выборок:  train - {X_train.shape}, val - {X_val.shape}, test - {X_test.shape}")
+
+        #  2. Нормализация входных признаков данных
+        row_data = {'X_train':X_train, 'X_val':X_val, 'X_test':X_test}
+        X_train_processed, X_val_processed, X_test_processed = self._normalization(row_data) # формат данных - pandas.Dataframe
+
+        #  3. Балансировка тренировочных данных
+        X_train_balanced, y_train_balanced = self.balance(X_train_processed, y_train)
+        counter = dict(Counter(y_train_balanced))
+        counter.setdefault(0, counter.pop(0))
+        counter.setdefault(1, counter.pop(1))
+        print(f"\nМиноритарный класс в TRAIN после балансировки: {round(100 * counter[1]/(counter[0]+counter[1]))}%  - {counter}")
+
+        y_val_temp = np.array(y_val).ravel()
+        counter = dict(Counter(y_val_temp))
+        counter.setdefault(0, counter.pop(0))
+        counter.setdefault(1, counter.pop(1))
+        print(f"\nРаспределение классов в TEST:  {round(100 * counter[1]/(counter[0]+counter[1]))}%  - {counter}")
+
+        print(f"Размерность данных после Preproccessing()\n"
+              f"X_train_balanced - {X_train_balanced.shape}, X_val_processed - {X_val_processed.shape}, X_test_processed - {X_test_processed.shape}\n"
+              f"y_train_balanced - {y_train_balanced.shape}, y_val - {y_val.values.ravel().shape}, y_test - {y_test.values.ravel().shape}")
+
+        # 4.  Установка соответствий между столбцами данных и индикаторов
+        columns_X = list(X_train_processed.columns)
+        sets_X = [pd.DataFrame(set_X, columns=columns_X) for set_X in [X_train_balanced, X_val_processed, X_test_processed]]
+        sets_y = [pd.DataFrame(set_y, columns=['target']) for set_y in [y_train_balanced, y_val, y_test]]
+        sets_Xy = list(zip(sets_X, sets_y))
+        sets_Xy = list(map(lambda x: pd.concat([x[0],x[1]], axis=1), sets_Xy))
+        dict_Xy = {'Xy_train':sets_Xy[0], 'Xy_val':sets_Xy[1], 'Xy_test':sets_Xy[2]}
+        dict_Xy = self.indicators_setup(dict_Xy)
+        return dict_Xy
+        return X_train_balanced, X_val_processed, X_test_processed, y_train_balanced, y_val.values.ravel(), y_test.values.ravel()
+
+    def predicate(self):
+        try:
+            y = self.data[self.cols_res]
+        except: y = None
+        X = self.data.drop(columns=self.cols_drop)
+        preprocessor = load(self.preprocessor)
+        X_processed = preprocessor.transform(X)
+        return X_processed,  y, X, self.data
+

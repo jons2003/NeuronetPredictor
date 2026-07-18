@@ -1,0 +1,34 @@
+database:
+  data_db:    /home/neuro_linux/data/summary.db
+  prematch_db:  /home/neuro_linux/data/prematch.db
+  models_dir: /home/neuro_linux/data/models/
+  journal_db: /home/neuro_linux/data/models/journal.db
+
+DF_getter:
+  vol_data:  full       # 'full' - все исходные данные, ' dense' - выбор только полностью заполненных записей
+  mask_name: contr # name - имя метода фильтра (определяет необходимое кол-во столбцов Dataframe и target )
+  args_mask:
+    data_synthetic:  y # y/n - использовать синтез столбцов, посредством деленияб например HA_win/GA_win -> HA_win+GA_win
+    target_version: max_loss_fb # Определение целевой переменной
+
+Preprocessing:
+  balance_method: SMOTE      # 'undersample'- удалиение данных из класса для выровнивания распределения /
+                                  # 'oversample'- добавление примеров миноритарного  класса копированием
+                                  # 'SMOTE' - добавление примеров миноритарного  класса путем синтеза новых данных
+                                  #  'n' - балансировка отсутствует
+  categoricl_features: n          # y/n - использование категорииальных признаков
+
+Model:
+  compile:
+    focal_params:
+      alpha:    0.95 # 0.5 ... 1.0
+      gamma:    1.0 # 2...5
+      alpha_fp: 10.0 # 1...4
+    focal_range:
+      alpha_range: 1.0 9.0 0.5
+      gamma_range: 1.0 5.0 0.5
+      alpha_fp_range: 1.0 10.0 0.5
+
+
+
+

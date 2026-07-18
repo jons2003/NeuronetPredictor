@@ -1,0 +1,26 @@
+database:
+  data_db:    /home/neuro_linux/data/summary.db
+  pred_db:    /home/neuro_linux/data/prematch.db
+  models_dir: /home/neuro_linux/data/models/
+  journal_db: /home/neuro_linux/data/models/journal.db
+
+DF_getter:
+  vol_data:  full       # 'full' - все исходные данные, ' dense' - выбор только полностью заполненных записей
+  mask_name: fb_opposite # name - имя метода фильтра (определяет необходимое кол-во столбцов Dataframe и target )
+  args_getter:
+    data_synthtetic: None # True/False - применение синтезированных столбцов
+
+Preprocessing:
+  balance: None      # 'undersample'- удалиение данных из класса для выровнивания распределения /
+                     # 'oversample'- добавление примеров миноритарного  класса
+                     # None - балансировка отсутствует
+
+
+Model:
+  compile:
+    optimizer:
+      name_optimizer: optimizers.Adam
+      learning_rate: 1e-4
+
+
+
